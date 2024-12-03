@@ -1,0 +1,694 @@
+---
+title: "dpa_p1"
+output: pdf_document
+date: "2024-03-03"
+---
+
+```{r}
+# Load necessary libraries
+library(dplyr)     # For data manipulation
+library(knitr)     # For printing output nicely
+library(data.table)
+library(janitor)
+library(tidyr)
+library(visdat)
+library(arrow)
+library(lubridate)
+library(ggplot2)   # For data visualization
+
+# Read the CSV file
+df_raw <- read.csv("Traffic_Crashes_-_Crashes_20240302.csv")
+
+# Print column names
+print(colnames(df_raw))
+
+# Print the number of rows and columns
+cat("Number of rows:", nrow(df_raw), "\n")
+cat("Number of columns:", ncol(df_raw), "\n")
+
+# Display information about the dataset
+str(df_raw)
+
+# Rename columns
+df_1 <- df_raw %>%
+  rename(inj_non_incap = INJURIES_NON_INCAPACITATING,
+         inj_report_not_evdnt = INJURIES_REPORTED_NOT_EVIDENT)
+
+# Drop unwanted columns
+df_1 <- df_raw %>%
+  select(-CRASH_RECORD_ID, -CRASH_DATE_EST_I, -LANE_CNT, -LOCATION, -REPORT_TYPE, -DATE_POLICE_NOTIFIED,
+         -PHOTOS_TAKEN_I, -STATEMENTS_TAKEN_I, -DOORING_I, -WORK_ZONE_I, -WORK_ZONE_TYPE, -WORKERS_PRESENT_I)
+
+# Assuming df_1 is your dataframe
+df_c <- df_1
+
+# Assuming df_c is your dataframe
+df_c <- df_c %>%
+  mutate(INTERSECTION_RELATED_I = if_else(is.na(INTERSECTION_RELATED_I), 'N', INTERSECTION_RELATED_I),
+         NOT_RIGHT_OF_WAY_I = if_else(is.na(NOT_RIGHT_OF_WAY_I), 'N', NOT_RIGHT_OF_WAY_I),
+         HIT_AND_RUN_I = if_else(is.na(HIT_AND_RUN_I), 'N', HIT_AND_RUN_I))
+
+# Set columns to 0 where injuries_total is missing and crash_type is 'NO INJURY / DRIVE AWAY'
+df_c <- df_c %>%
+  mutate(INJURIES_TOTAL = ifelse(is.na(INJURIES_TOTAL) & CRASH_TYPE == 'NO INJURY / DRIVE AWAY', 0, INJURIES_TOTAL),
+         INJURIES_FATAL = ifelse(is.na(INJURIES_TOTAL) & CRASH_TYPE == 'NO INJURY / DRIVE AWAY', 0, INJURIES_FATAL),
+         INJURIES_INCAPACITATING = ifelse(is.na(INJURIES_TOTAL) & CRASH_TYPE == 'NO INJURY / DRIVE AWAY', 0, INJURIES_INCAPACITATING),
+         INJURIES_NON_INCAPACITATING = ifelse(is.na(INJURIES_TOTAL) & CRASH_TYPE == 'NO INJURY / DRIVE AWAY', 0, INJURIES_NON_INCAPACITATING),
+         INJURIES_REPORTED_NOT_EVIDENT = ifelse(is.na(INJURIES_TOTAL) & CRASH_TYPE == 'NO INJURY / DRIVE AWAY', 0, INJURIES_REPORTED_NOT_EVIDENT),
+         INJURIES_NO_INDICATION = ifelse(is.na(INJURIES_TOTAL) & CRASH_TYPE == 'NO INJURY / DRIVE AWAY', 0, INJURIES_NO_INDICATION),
+         INJURIES_UNKNOWN = ifelse(is.na(INJURIES_TOTAL) & CRASH_TYPE == 'NO INJURY / DRIVE AWAY', 0, INJURIES_UNKNOWN))
+
+# Drop rows where injuries_total is missing
+df_c <- df_c %>%
+  filter(!is.na(INJURIES_TOTAL))
+
+# Set most_severe_injury = 'NO INDICATION OF INJURY'
+# wherever most_severe_injury is missing and injuries_total is 0
+df_c <- df_c %>%
+  mutate(MOST_SEVERE_INJURY = ifelse(is.na(MOST_SEVERE_INJURY) & INJURIES_TOTAL == 0,
+                                     'NO INDICATION OF INJURY', MOST_SEVERE_INJURY))
+
+# Print table of MOST_SEVERE_INJURY values
+print(as.data.frame(table(df_c$MOST_SEVERE_INJURY, useNA = "ifany")))
+
+# Convert CRASH_DATE to datetime and create crash_year column
+df_c <- df_c %>%
+  mutate(CRASH_DATE = mdy_hms(CRASH_DATE),
+         crash_year = year(CRASH_DATE))
+
+# Create address column
+df_c <- df_c %>%
+  mutate(
+    STREET_NO = as.character(STREET_NO),
+    STREET_DIRECTION = as.character(STREET_DIRECTION),
+    STREET_NAME = as.character(STREET_NAME),
+    address = paste0(STREET_NO, " ", STREET_DIRECTION, " ", STREET_NAME)
+  )
+
+# I will not drop duplicates, as they represent repeated incident characteristics, I think it's useful
+# Assuming df_c is your dataframe
+df_c2 <- df_c
+
+# Using base R unique function to drop duplicates
+df_c2 <- unique(df_c)
+
+# Using dplyr's distinct function
+df_c2 <- distinct(df_c)
+
+# Drop rows that have both latitude and longitude == 0
+df_c2 <- df_c2 %>%
+  filter(LATITUDE != 0 & LONGITUDE != 0)
+
+# Convert columns to integer type
+df_c2 <- df_c2 %>%
+  mutate(
+    BEAT_OF_OCCURRENCE = as.integer(BEAT_OF_OCCURRENCE),
+    INJURIES_TOTAL = as.integer(INJURIES_TOTAL),
+    INJURIES_FATAL = as.integer(INJURIES_FATAL),
+    INJURIES_INCAPACITATING = as.integer(INJURIES_INCAPACITATING),
+    INJURIES_NON_INCAPACITATING = as.integer(INJURIES_NON_INCAPACITATING),
+    INJURIES_REPORTED_NOT_EVIDENT = as.integer(INJURIES_REPORTED_NOT_EVIDENT),
+    INJURIES_NO_INDICATION = as.integer(INJURIES_NO_INDICATION)
+  )
+
+# Drop columns "not_right_of_way_i" and "injuries_unknown"
+df_c2 <- df_c2 %>%
+  select(-NOT_RIGHT_OF_WAY_I, -INJURIES_UNKNOWN)
+
+# Inspect the structure of the dataframe
+str(df_c2)
+
+# Write dataframe to Parquet format
+write_parquet(df_c2, "output12.parquet")
+
+# Read Parquet file into a dataframe
+crash_df <- arrow::read_parquet("output12.parquet")
+
+# Inspect the structure of the dataframe
+str(crash_df)
+
+# Rounding at mid-point to nearest round_unit
+round_unit <- 5
+crash_df$POSTED_SPEED_LIMIT <- (crash_df$POSTED_SPEED_LIMIT %/% round_unit * round_unit) + round((crash_df$POSTED_SPEED_LIMIT %% round_unit) / round_unit) * round_unit
+
+# Counting the occurrences of each rounded value
+table(crash_df$POSTED_SPEED_LIMIT)
+
+# Create 'has_injuries' column based on injuries_total
+crash_df$has_injuries <- as.integer(crash_df$INJURIES_TOTAL > 0)
+
+# Count the occurrences of each unique value in 'has_injuries' column
+table(crash_df$has_injuries)
+
+# Create 'has_fatal' column based on injuries_fatal
+crash_df$has_fatal <- as.integer(crash_df$INJURIES_FATAL > 0)
+
+# Count the occurrences of each unique value in 'has_fatal' column
+table(crash_df$has_fatal)
+
+# Create 'crash_time_of_day' column using cut function
+crash_df$crash_time_of_day <- cut(crash_df$CRASH_HOUR, breaks = c(-Inf, 6, 12, 18, Inf), labels = c("overnight", "morning", "mid_day", "evening"))
+
+# Count the occurrences of each category in 'crash_time_of_day' column
+table(crash_df$crash_time_of_day)
+
+# Define list of feature names
+features_names <- c(
+  'crash_date',
+  'crash_year',
+  'crash_month',
+  'crash_day_of_week',
+  'crash_hour',
+  'crash_time_of_day', # New
+  'latitude',
+  'longitude',
+  'beat_of_occurrence',
+  'address',
+  'street_no',
+  'street_direction',
+  'street_name',
+  'posted_speed_limit',
+  'traffic_control_device',
+  'device_condition',
+  'weather_condition',
+  'lighting_condition',
+  'trafficway_type',
+  'alignment',
+  'roadway_surface_cond',
+  'road_defect',
+  'first_crash_type',
+  'prim_contributory_cause',
+  'sec_contributory_cause',
+  'num_units'
+)
+
+# Define list of target names
+target_names <- c(
+  'has_injuries',  # New
+  'has_fatal',  # New
+  'crash_type',
+  'damage',
+  'injuries_total',
+  'injuries_fatal'
+)
+
+# Combine feature and target names
+all_columns <- c(features_names, target_names)
+
+all_columns
+colnames(crash_df)
+
+# Assuming df_c is your dataframe
+names(crash_df) <- tolower(names(crash_df))
+colnames(crash_df)
+
+file_crash_df_parquet <- "crash_df.parquet"
+
+# Write dataframe to Parquet format
+write_parquet(crash_df[all_columns], file_crash_df_parquet)
+
+# Replace crash_df with your data frame variable name and all_columns with the columns you want to include
+write_parquet(crash_df[, all_columns], "file_crash_df.parquet")
+
+# Replace file_crash_df_parquet with the path to your Parquet file
+crash_df <- read_parquet("file_crash_df.parquet")
+
+# Replace file_crash_df_parquet with the path to your Parquet file
+crash_df <- read_parquet("file_crash_df.parquet")
+
+# Replace crash_df with your data frame variable name and target_names with the names of the columns you want to select
+crash_targets <- crash_df %>%
+  select(target_names)
+
+# Print information about the selected columns
+str(crash_targets)
+str(crash_df)
+
+# File path to the Parquet file
+file_crash_df_parquet <- "crash_df.parquet"
+
+# Read the Parquet file into a dataframe
+crash_df <- arrow::read_parquet(file_crash_df_parquet)
+
+# Print information about the dataframe
+str(crash_df)
+
+# Subset the data where crash_year > 2017 and crash_year < 2021
+subset_df <- subset(crash_df, crash_year > 2017 & crash_year < 2021)
+
+# Print the subsetted dataframe
+print(subset_df)
+
+# Filter rows based on the condition (crash_year > 2017 & crash_year < 2021)
+crash_df <- crash_df %>%
+  filter(crash_year > 2017 & crash_year < 2021)
+
+
+# Retrieve column names of the dataframe crash_df
+column_names <- colnames(crash_df)
+column_names
+
+nrow(crash_df)
+show(crash_df$crash_year)
+
+features_names <- c(
+  'crash_date',
+  'crash_year',
+  'crash_month',
+  'crash_day_of_week',
+  'crash_hour',
+  'crash_time_of_day', # New
+  'latitude',
+  'longitude',
+  'beat_of_occurrence',
+  'address',
+  #    'street_no',
+  #    'street_direction',
+  #    'street_name',
+  'posted_speed_limit',
+  'traffic_control_device',
+  'device_condition',
+  'weather_condition',
+  'lighting_condition',
+  'trafficway_type',
+  'alignment',
+  'roadway_surface_cond',
+  'road_defect',
+  'first_crash_type',
+  'prim_contributory_cause',
+  'sec_contributory_cause',
+  'num_units'
+)
+
+target_names <- c(
+  'has_injuries',  # New
+  'has_fatal',  # New
+  'crash_type',
+  'damage',
+  'injuries_total',
+  'injuries_fatal'
+  #    'injuries_incapacitating',
+  #    'inj_non_incap',
+  #    'inj_report_not_evdnt',
+  #    'injuries_no_indication',
+  #    'most_severe_injury'
+)
+
+all_columns <- c(features_names, target_names)
+all_columns
+
+table(crash_df$posted_speed_limit)
+
+table(round(crash_df$posted_speed_limit, -1))
+
+crash_df %>%
+  mutate(rounded_speed_limit = (posted_speed_limit %/% 10 * 10) + round((posted_speed_limit %% 10) / 10) * 10) %>%
+  count(rounded_speed_limit)
+
+crash_df %>%
+  mutate(rounded_speed_limit = (posted_speed_limit %/% 5 * 5) + round((posted_speed_limit %% 5) / 5) * 5) %>%
+  count(rounded_speed_limit)
+
+rounding_function <- function(x) {
+  (floor(x / 10) * 10) + round((x %% 10) / 10) * 10
+}
+
+result <- rounding_function(6)
+result
+
+crash_df %>%
+  pull(beat_of_occurrence) %>%
+  n_distinct()
+
+crash_df %>%
+  pull(address) %>%
+  n_distinct()
+
+crash_df %>%
+  group_by(latitude, longitude) %>%
+  summarise(n = n())
+
+table(crash_df$crash_type)
+
+table(as.integer(crash_df$injuries_total > 0))
+
+table(as.integer(crash_df$injuries_fatal > 0))
+
+table(crash_df$first_crash_type)
+
+table(crash_df$trafficway_type)
+
+table(crash_df$prim_contributory_cause)
+
+table(crash_df$sec_contributory_cause)
+
+table(crash_df$traffic_control_device)
+
+summary(crash_df$injuries_total)
+
+# Week day mapping
+week_days <- c("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday")
+
+# Weekday/Weekend mapping
+is_weekday <- c("Weekend", "Weekday")
+
+# Assuming crash_df is your dataframe
+par(mfrow=c(3, 1))  # Set the layout to 3 rows and 1 column
+for(year in unique(crash_df$crash_year)) {
+  hist(subset(crash_df, crash_year == year)$crash_hour, 
+       breaks = 24,
+       main = paste("Crashes by Hour - Year", year),
+       xlab = "Hour",
+       ylab = "Frequency",
+       col = "lightblue",
+       xlim = c(0, 24),
+       ylim = c(0, max(table(crash_df$crash_hour))),
+       axes = FALSE)
+  axis(1, at=seq(0, 24, by=2))  # Add x-axis labels every 2 hours
+  axis(2)  # Add y-axis
+}
+
+
+# Filter dataframe for crashes with injuries
+crashes_with_injuries <- subset(crash_df, has_injuries == 1)
+
+# Plot histograms by crash_year
+ggplot(crashes_with_injuries, aes(x = crash_hour)) +
+  geom_histogram(binwidth = 1) +
+  facet_wrap(~ crash_year, nrow = 3) +
+  theme_minimal() +
+  labs(x = "Crash Hour", y = "Count") +
+  theme(legend.position = "none")
+
+# Convert crash_hour to numeric before using cut function
+crash_df$crash_hour <- as.numeric(crash_df$crash_hour)
+
+# Create 'crash_time_of_day' column using cut function
+crash_df$crash_time_of_day <- cut(crash_df$crash_hour, breaks = c(-Inf, 6, 12, 18, Inf), labels = c("overnight", "morning", "mid_day", "evening"))
+
+# Count the occurrences of each category in 'crash_time_of_day' column
+table(crash_df$crash_time_of_day)
+
+# Plot histogram of 'crash_time_of_day'
+hist(crash_df$crash_time_of_day)
+
+sum(is.na(crash_df$crash_hour))
+
+sum(is.na(z))
+
+summary(crash_df$crash_hour)
+
+crash_agg <- crash_df %>%
+  group_by(crash_year, crash_month, crash_hour) %>%
+  summarise(injuries_total = sum(injuries_total, na.rm = TRUE),
+            injuries_fatal = sum(injuries_fatal, na.rm = TRUE)) %>%
+  mutate(across(c(injuries_total, injuries_fatal), ~ifelse(is.na(.), 0, .))) %>%
+  ungroup()
+
+crash_pivot <- crash_agg %>%
+  pivot_wider(names_from = crash_year, 
+              values_from = c(injuries_total, injuries_fatal),
+              values_fn = sum,
+              names_sep = "_")
+
+# Aggregate data
+crash_agg <- crash_df %>%
+  group_by(crash_year, crash_month, crash_time_of_day) %>%
+  summarise(has_injuries = sum(has_injuries),
+            has_fatal = sum(has_fatal),
+            injuries_total = sum(injuries_total),
+            injuries_fatal = sum(injuries_fatal)) %>%
+  mutate_at(vars(has_injuries, has_fatal, injuries_total, injuries_fatal), ~ ifelse(is.na(.), 0, .))
+
+# Plotting
+p <- ggplot(crash_agg, aes(x = crash_month, y = has_injuries, color = crash_time_of_day)) +
+  geom_line() +
+  facet_wrap(~ crash_year, ncol = 3) +
+  labs(title = "Chicago Crashes - Time of Day Trends", y = "Number of Injuries") +
+  theme_bw()
+
+print(p)
+
+# Aggregate data
+crash_agg <- crash_df %>%
+  group_by(crash_year, crash_month, crash_day_of_week) %>%
+  summarise(has_injuries = sum(has_injuries),
+            injuries_total = sum(injuries_total),
+            injuries_fatal = sum(injuries_fatal)) %>%
+  mutate_at(vars(has_injuries, injuries_total, injuries_fatal), ~ ifelse(is.na(.), 0, .))
+
+# Plotting
+g <- ggplot(crash_agg, aes(x = crash_month, y = has_injuries, fill = factor(crash_day_of_week))) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_wrap(~ crash_year, ncol = 3) +
+  theme_minimal() +
+  labs(x = "Month", y = "Total Injuries", title = "Total Injuries by Month and Day of Week") +
+  scale_fill_brewer(palette = "Set1") +
+  guides(fill = guide_legend(title = "Day of Week"))
+
+print(g)
+
+sum(crash_df$weather_condition == 'OTHER', na.rm = TRUE)
+
+# Grouping and aggregating
+crash_agg <- crash_df %>%
+  group_by(crash_year, crash_month, lighting_condition) %>%
+  summarise(has_injuries = sum(has_injuries, na.rm = TRUE),
+            injuries_total = sum(injuries_total, na.rm = TRUE),
+            injuries_fatal = sum(injuries_fatal, na.rm = TRUE)) %>%
+  mutate_at(vars(has_injuries, injuries_total, injuries_fatal), ~ ifelse(is.na(.), 0, .)) %>%
+  ungroup() %>%
+  filter(lighting_condition != "UNKNOWN")
+
+# Creating FacetGrid plot
+g <- ggplot(crash_agg, aes(x = crash_month, y = has_injuries, col = lighting_condition)) +
+  geom_line() +
+  facet_wrap(~ crash_year, ncol = 3) +
+  labs(title = "Chicago Crashes - Lighting Condition Trends", y = "Has Injuries") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+print(g)
+
+crash_agg <- crash_df %>%
+  group_by(crash_year, crash_month, weather_condition) %>%
+  summarise(has_injuries = sum(has_injuries),
+            injuries_total = sum(injuries_total),
+            injuries_fatal = sum(injuries_fatal)) %>%
+  mutate(across(c(has_injuries, injuries_total, injuries_fatal), ~ifelse(is.na(.), 0, .))) %>%
+  ungroup()
+
+g <- ggplot(crash_agg, aes(x = crash_month, y = has_injuries, color = weather_condition)) +
+  geom_line() +
+  facet_wrap(~crash_year, ncol = 3) +
+  labs(title = "Chicago Crashes - Weather Condition Trends", y = "Total Injuries") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+print(g)
+
+# Grouping and aggregating
+crash_agg <- crash_df %>%
+  group_by(crash_year, crash_month, weather_condition) %>%
+  summarise(has_injuries = sum(has_injuries),
+            injuries_total = sum(injuries_total),
+            injuries_fatal = sum(injuries_fatal)) %>%
+  mutate_at(vars(has_injuries, injuries_total, injuries_fatal), ~ ifelse(is.na(.), 0, .)) %>%
+  filter(!weather_condition %in% c("CLEAR")) %>%
+  ungroup()
+
+# Creating facet grid
+g <- ggplot(crash_agg, aes(x = crash_month, y = has_injuries, color = weather_condition)) +
+  geom_line() +
+  facet_wrap(~crash_year, ncol = 3) +
+  labs(title = "Chicago Crashes - Weather Condition Trends (Excluding CLEAR)", y = "Has Injuries") +
+  theme(plot.title = element_text(face = "bold"))
+
+# Displaying the plot
+print(g)
+
+
+# Create a copy of the dataframe
+crash_sdf <- crash_df
+
+# Select columns to be standardized
+col_names <- c('latitude', 'longitude')
+
+# Standardize selected columns
+crash_sdf[col_names] <- scale(crash_sdf[col_names])
+
+# Print summary statistics of standardized columns
+print(summary(crash_sdf[col_names]))
+
+# Print first few rows of the standardized dataframe
+head(crash_sdf)
+
+# Define function for normalizing numerical columns
+normalize <- function(x) {
+  return((x - min(x)) / (max(x) - min(x)))
+}
+
+# Select columns to be normalized
+cols_to_normalize <- c('latitude', 'longitude')
+
+# Normalize selected columns
+crash_df[cols_to_normalize] <- lapply(crash_df[cols_to_normalize], normalize)
+
+# Print summary statistics of normalized columns
+print(summary(crash_df[cols_to_normalize]))
+
+# Print first few rows of the normalized dataframe
+head(crash_df)
+
+# Identify numerical columns
+numerical_columns <- sapply(crash_df, is.numeric)
+
+# Identify categorical columns
+categorical_columns <- setdiff(names(crash_df), names(crash_df)[numerical_columns])
+
+# Convert categorical columns to factors
+crash_df[categorical_columns] <- lapply(crash_df[categorical_columns], as.factor)
+
+# Print summary statistics of the dataframe
+summary(crash_df)
+
+# Print first few rows of the dataframe
+head(crash_df)
+
+# Define function to one-hot encode categorical variables
+one_hot_encode <- function(data, columns) {
+  for (col in columns) {
+    one_hot <- as.data.frame(model.matrix(~data[[col]] - 1))
+    names(one_hot) <- gsub("^", paste(col, "_"), names(one_hot))
+    data <- cbind(data, one_hot)
+  }
+  data <- data[, !names(data) %in% columns]
+  return(data)
+}
+
+# One-hot encode categorical columns
+crash_df <- one_hot_encode(crash_df, categorical_columns)
+
+# Print summary statistics of the dataframe
+summary(crash_df)
+
+# Print first few rows of the dataframe
+head(crash_df)
+
+# Create a copy of the dataframe
+crash_df_copy <- crash_df
+
+# Identify columns with missing values
+missing_columns <- colnames(crash_df)[colSums(is.na(crash_df)) > 0]
+
+# Impute missing values with mean
+for (col in missing_columns) {
+  crash_df_copy[is.na(crash_df_copy[, col]), col] <- mean(crash_df_copy[, col], na.rm = TRUE)
+}
+
+# Print summary statistics of the dataframe
+summary(crash_df_copy)
+
+# Print first few rows of the dataframe
+head(crash_df_copy)
+
+# Convert dataframe to matrix
+crash_matrix <- as.matrix(crash_df)
+
+# Perform singular value decomposition
+svd_result <- svd(crash_matrix)
+
+# Print the singular values
+print(svd_result$d)
+
+# Plot the singular values
+plot(svd_result$d, type = "b", main = "Singular Values Plot", xlab = "Index", ylab = "Singular Value")
+
+# Create a copy of the dataframe
+crash_df_copy <- crash_df
+
+# Identify highly correlated columns
+correlation_matrix <- cor(crash_df_copy)
+
+# Find column pairs with correlation coefficient > 0.7
+highly_correlated <- findCorrelation(correlation_matrix, cutoff = 0.7, verbose = TRUE)
+
+# Print the highly correlated column pairs
+print(highly_correlated)
+
+# Remove highly correlated columns
+crash_df_copy <- crash_df_copy[, -highly_correlated]
+
+# Print summary statistics of the dataframe
+summary(crash_df_copy)
+
+# Print first few rows of the dataframe
+head(crash_df_copy)
+
+# Convert dataframe to matrix
+crash_matrix <- as.matrix(crash_df)
+
+# Perform PCA
+pca_result <- prcomp(crash_matrix, center = TRUE, scale. = TRUE)
+
+# Print summary of PCA
+summary(pca_result)
+
+# Plot scree plot
+screeplot(pca_result, type = "lines", main = "Scree Plot")
+
+# Biplot
+biplot(pca_result)
+
+# Get loadings
+loadings <- pca_result$rotation
+
+# Print loadings
+print(loadings)
+
+# Plot first two principal components
+ggplot(data = as.data.frame(pca_result$x), aes(x = PC1, y = PC2)) +
+  geom_point() +
+  labs(x = "Principal Component 1", y = "Principal Component 2", title = "PCA Biplot") +
+  theme_minimal()
+
+# Assuming df_c is your dataframe
+df_c2 <- df_c %>%
+  mutate(INTERSECTION_RELATED_I = if_else(is.na(INTERSECTION_RELATED_I), 'N', INTERSECTION_RELATED_I),
+         NOT_RIGHT_OF_WAY_I = if_else(is.na(NOT_RIGHT_OF_WAY_I), 'N', NOT_RIGHT_OF_WAY_I),
+         HIT_AND_RUN_I = if_else(is.na(HIT_AND_RUN_I), 'N', HIT_AND_RUN_I))
+
+# Set columns to 0 where injuries_total is missing and crash_type is 'NO INJURY / DRIVE AWAY'
+df_c2 <- df_c %>%
+  mutate(INJURIES_TOTAL = ifelse(is.na(INJURIES_TOTAL) & CRASH_TYPE == 'NO INJURY / DRIVE AWAY', 0, INJURIES_TOTAL),
+         INJURIES_FATAL = ifelse(is.na(INJURIES_TOTAL) & CRASH_TYPE == 'NO INJURY / DRIVE AWAY', 0, INJURIES_FATAL),
+         INJURIES_INCAPACITATING = ifelse(is.na(INJURIES_TOTAL) & CRASH_TYPE == 'NO INJURY / DRIVE AWAY', 0, INJURIES_INCAPACITATING),
+         INJURIES_NON_INCAPACITATING = ifelse(is.na(INJURIES_TOTAL) & CRASH_TYPE == 'NO INJURY / DRIVE AWAY', 0, INJURIES_NON_INCAPACITATING),
+         INJURIES_REPORTED_NOT_EVIDENT = ifelse(is.na(INJURIES_TOTAL) & CRASH_TYPE == 'NO INJURY / DRIVE AWAY', 0, INJURIES_REPORTED_NOT_EVIDENT),
+         INJURIES_NO_INDICATION = ifelse(is.na(INJURIES_TOTAL) & CRASH_TYPE == 'NO INJURY / DRIVE AWAY', 0, INJURIES_NO_INDICATION),
+         INJURIES_UNKNOWN = ifelse(is.na(INJURIES_TOTAL) & CRASH_TYPE == 'NO INJURY / DRIVE AWAY', 0, INJURIES_UNKNOWN))
+
+# Drop rows where injuries_total is missing
+df_c2 <- df_c %>%
+  filter(!is.na(INJURIES_TOTAL))
+
+# Set most_severe_injury = 'NO INDICATION OF INJURY'
+# wherever most_severe_injury is missing and injuries_total is 0
+df_c2 <- df_c %>%
+  mutate(MOST_SEVERE_INJURY = ifelse(is.na(MOST_SEVERE_INJURY) & INJURIES_TOTAL == 0,
+                                     'NO INDICATION OF INJURY', MOST_SEVERE_INJURY))
+
+# Print table of MOST_SEVERE_INJURY values
+print(as.data.frame(table(df_c$MOST_SEVERE_INJURY)))
+
+# Identify unique values in INJURY_CLASSIFICATION column
+unique(df_c$INJURY_CLASSIFICATION)
+
+# Re-encode INJURY_CLASSIFICATION values as factors
+df_c <- df_c %>%
+  mutate(INJURY_CLASSIFICATION = case_when(
+    INJURY_CLASSIFICATION == 'NO INDICATION OF INJURY' ~ 'NONE',
+    INJURY_CLASSIFICATION == 'NONINCAPACITATING INJURY' ~ 'NON-INCAPACITATING',
+    INJURY_CLASSIFICATION == 'REPORTED, NOT EVIDENT' ~ 'REPORTED NOT EVIDENT',
+    TRUE ~ as.character(INJURY_CLASSIFICATION)
+  ))
+
+```
